@@ -1,2 +1,4 @@
-./*.pdf
-./SCAN_TESTS
+input/*
+output/*
+backup/*
+temps/*
