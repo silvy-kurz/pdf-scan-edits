@@ -1,133 +1,169 @@
 import fitz  # PyMuPDF
 import cv2
 import numpy as np
-import os
+
+ZOOM = 2
 
 
-class PDFEditor:
-    def __init__(self):
-        pass
-
-    # --- TASK 1: MERGE & SPLIT ---
-    def merge_pdfs(self, input_paths, output_path):
-        """Combines a list of PDF paths into one file."""
-        result = fitz.open()
-        for path in input_paths:
-            with fitz.open(path) as m:
-                result.insert_pdf(m)
-        result.save(output_path)
-        print(f"Merged {len(input_paths)} files into {output_path}")
-
-    def extract_page(self, input_path, page_num, output_path):
-        """Splits a single page out of a PDF."""
-        with fitz.open(input_path) as src:
-            new_doc = fitz.open()
-            new_doc.insert_pdf(src, from_page=page_num, to_page=page_num)
-            new_doc.save(output_path)
-        print(f"Extracted page {page_num} to {output_path}")
-
-    # --- TASK 2: CROP ---
-    def crop_page(self, input_path, output_path, crop_rect):
-        """
-        crop_rect: (x0, y0, x1, y1) coordinates.
-        Note: PDFs use a coordinate system usually starting at top-left.
-        """
-        doc = fitz.open(input_path)
-        for page in doc:
-            page.set_cropbox(fitz.Rect(crop_rect))
-        doc.save(output_path)
-        print(f"Cropped PDF saved to {output_path}")
-
-    # --- TASK 3: INTERACTIVE STAMPING (FIXED) ---
-    def interactive_stamp(self, target_pdf, source_pdf, output_path, source_crop):
-        """
-        target_pdf: Die Hausaufgabe, die korrigiert werden soll.
-        source_pdf: Die PDF, die den 'guten' Patch oder das leere Papier enthält.
-        source_crop: (x0, y0, x1, y1) des Bereichs in der Quell-PDF.
-        """
-        # 1. Patch aus der Quell-PDF extrahieren (als Bild im Speicher)
-        src_doc = fitz.open(source_pdf)
-        src_page = src_doc[0]
-        # Erstellt ein Bild vom spezifischen Bereich (Crop)
-        pix_patch = src_page.get_pixmap(
-            clip=fitz.Rect(source_crop), matrix=fitz.Matrix(2, 2)
-        )
-        img_patch = np.frombuffer(pix_patch.samples, dtype=np.uint8).reshape(
-            pix_patch.h, pix_patch.w, 3
-        )
-        img_patch = cv2.cvtColor(img_patch, cv2.COLOR_RGB2BGR)
-
-        # Zwischenspeichern als temporäres PNG für PyMuPDF insert_image
-        temp_patch_path = "temp_patch.png"
-        cv2.imwrite(temp_patch_path, img_patch)
-
-        # 2. Ziel-PDF für OpenCV vorbereiten
-        doc = fitz.open(target_pdf)
-        page = doc[0]
-        pix_target = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-        img_target = np.frombuffer(pix_target.samples, dtype=np.uint8).reshape(
-            pix_target.h, pix_target.w, 3
-        )
-        img_target = cv2.cvtColor(img_target, cv2.COLOR_RGB2BGR)
-
-        sh, sw = img_patch.shape[:2]
-        display_img = img_target.copy()
-        stamps_to_apply = []
-
-        def mouse_callback(event, x, y, flags, param):
-            nonlocal display_img
-            if event == cv2.EVENT_LBUTTONDOWN:
-                # Koordinaten speichern (skaliert auf PDF-Punkte)
-                stamps_to_apply.append((x / 2, y / 2))
-                # Vorschau im Fenster (Rechteck zeichnen)
-                cv2.rectangle(display_img, (x, y), (x + sw, y + sh), (255, 0, 0), 2)
-                cv2.imshow("Klick zum Stempeln - 'S' zum Speichern", display_img)
-
-        cv2.imshow("Klick zum Stempeln - 'S' zum Speichern", display_img)
-        cv2.setMouseCallback("Klick zum Stempeln - 'S' zum Speichern", mouse_callback)
-
-        while True:
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord("s"):
-                break
-            if key == 27:
-                return
-
-        # 3. Den Patch an allen geklickten Stellen in die PDF 'einbrennen'
-        for sx, sy in stamps_to_apply:
-            # Wir berechnen die Zielbox basierend auf der Originalgröße des Patches
-            # source_crop[2]-source_crop[0] gibt die Breite in PDF-Punkten
-            patch_w = source_crop[2] - source_crop[0]
-            patch_h = source_crop[3] - source_crop[1]
-            rect = fitz.Rect(sx, sy, sx + patch_w, sy + patch_h)
-            page.insert_image(rect, filename=temp_patch_path)
-
-        doc.save(output_path)
-        src_doc.close()
-        if os.path.exists(temp_patch_path):
-            os.remove(temp_patch_path)
-        cv2.destroyAllWindows()
-        print(f"Reparierte PDF unter {output_path} gespeichert.")
+def pdf_to_cv2_img(pdf_path, page_num=0):
+    """Konvertiert eine PDF-Seite in ein OpenCV-kompatibles Bild."""
+    doc = fitz.open(pdf_path)
+    page = doc[page_num]
+    pix = page.get_pixmap(matrix=fitz.Matrix(ZOOM, ZOOM))
+    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, 3)
+    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    doc.close()
+    return img
 
 
-# --- EXAMPLE USAGE ---
-if __name__ == "__main__":
-    editor = PDFEditor()
+def merge_pdfs(input_paths, output_path):
+    result = fitz.open()
+    for path in input_paths:
+        with fitz.open(path) as m:
+            result.insert_pdf(m)
+    result.save(output_path)
+    print(f"Erfolg: {len(input_paths)} Dateien zusammengeführt -> {output_path}")
 
-    # Task 1: Merge
-    editor.merge_pdfs(["scan1.pdf", "scan2.pdf"], "combined.pdf")
 
-    # Task 2: Crop (x0, y0, x1, y1)
-    editor.crop_page("combined.pdf", "cropped.pdf", (50, 50, 400, 400))
+def split_pdf(input_path, page_num, output_path):
+    with fitz.open(input_path) as src:
+        new_doc = fitz.open()
+        new_doc.insert_pdf(src, from_page=page_num, to_page=page_num)
+        new_doc.save(output_path)
+    print(f"Erfolg: Seite {page_num} extrahiert -> {output_path}")
 
-    # Task 3: Interactive Stamp
-    # Beispiel: Nehme aus 'patch.pdf' ein Rechteck von (100, 100) bis (200, 150)
-    # und stempel es in 'homework.pdf'
-    editor.interactive_stamp(
-        "homework.pdf",
-        "patch.pdf",
-        "fixed_homework.pdf",
-        source_crop=(100, 100, 200, 150),
+
+def crop_pdf(input_path, output_path, coords):
+    """coords: (x0, y0, x1, y1) in PDF-Punkten"""
+    doc = fitz.open(input_path)
+    for page in doc:
+        page.set_cropbox(fitz.Rect(coords))
+    doc.save(output_path)
+    doc.close()
+    print(f"Erfolg: PDF zugeschnitten -> {output_path}")
+
+
+def select_patch_area(image, title, params, overlay_img=None):
+    """
+    Erweiterte Version deiner Navigations-Logik.
+    overlay_img: Wenn gesetzt, wird dieses Bild anstelle des Rahmens angezeigt.
+    """
+    w, h, x, y, step = params
+    height, width, _ = image.shape
+
+    while True:
+        x = max(0, min(x, width - w))
+        y = max(0, min(y, height - h))
+        w = max(10, min(w, width - x))
+        h = max(10, min(h, height - y))
+
+        display_img = image.copy()
+
+        if overlay_img is not None:
+            resized_overlay = cv2.resize(overlay_img, (w, h))
+            display_img[y : y + h, x : x + w] = resized_overlay
+            cv2.rectangle(display_img, (x, y), (x + w, y + h), (255, 0, 0), 1)
+        else:
+            cv2.rectangle(display_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
+
+        subset = image[y : y + h, x : x + w]
+        cv2.imshow(f"{title} - Main", display_img)
+        cv2.imshow(f"{title} - Current Subset", subset)
+
+        key = cv2.waitKey(0) & 0xFF
+
+        if key == ord("w"):
+            y -= step
+        elif key == ord("s"):
+            y += step
+        elif key == ord("a"):
+            x -= step
+        elif key == ord("d"):
+            x += step
+        elif key == ord("l"):
+            w += step
+        elif key == ord("h"):
+            w -= step
+        elif key == ord("j"):
+            h += step
+        elif key == ord("k"):
+            h -= step
+        elif key == ord("+"):
+            step = min(step + 5, 50)
+        elif key == ord("-"):
+            step = max(step - 5, 1)
+
+        elif key in [ord("e"), 13, ord("q"), 27]:
+            return subset, [w, h, x, y, step], key
+
+
+def master_patch_tool(target_pdf, source_pdf, output_path):
+    target_img = pdf_to_cv2_img(target_pdf)
+    source_img = pdf_to_cv2_img(source_pdf)
+
+    patches = []
+    current_params = [150, 150, 50, 50, 20]
+
+    print("\n--- PHASE 1: PATCHES AUS QUELLE WÄHLEN ---")
+    print(
+        "[ENTER]: Patch speichern & weiteren wählen | [E]: Fertig | [Q/ESC]: Abbrechen"
     )
 
-    print("Uncomment the lines in __main__ to run specific tasks.")
+    while True:
+        subset, current_params, key = select_patch_area(
+            source_img, "SOURCE", current_params
+        )
+        if key in [ord("q"), 27]:
+            return
+
+        patches.append(subset)
+        if key == ord("e"):
+            break
+
+    print("\n--- PHASE 2: PATCHES IM ZIEL PLATZIEREN ---")
+    final_placements = []
+
+    for i, p_img in enumerate(patches):
+        ph, pw, _ = p_img.shape
+        place_params = [pw, ph, 100, 100, 10]
+
+        _, final_params, key = select_patch_area(
+            target_img,
+            f"PLACEMENT {i + 1}/{len(patches)}",
+            place_params,
+            overlay_img=p_img,
+        )
+
+        if key in [ord("q"), 27]:
+            return
+
+        w, h, x, y, _ = final_params
+        rect = fitz.Rect(x / ZOOM, y / ZOOM, (x + w) / ZOOM, (y + h) / ZOOM)
+        final_placements.append((rect, p_img))
+
+    doc = fitz.open(target_pdf)
+    page = doc[0]
+    for rect, img_data in final_placements:
+        _, img_enc = cv2.imencode(".png", img_data)
+        page.insert_image(rect, stream=img_enc.tobytes())
+
+    doc.save(output_path)
+    doc.close()
+    cv2.destroyAllWindows()
+    print(f"\nDatei erfolgreich gespeichert: {output_path}")
+
+
+if __name__ == "__main__":
+    # --- TEST 1: MERGE ---
+    # merge_pdfs(["seite1.pdf", "seite2.pdf"], "zusammengefügt.pdf")
+
+    # --- TEST 2: SPLIT ---
+    # split_pdf("gesamt.pdf", 0, "einzelne_seite.pdf")
+
+    # --- TEST 3: CROP ---
+    # crop_pdf("input.pdf", "cropped.pdf", (50, 50, 400, 600))
+
+    # --- TEST 4: INTERACTIVE PATCHING ---
+    # master_patch_tool("deine_hausaufgabe.pdf", "dein_leeres_blatt.pdf", "korrigiert.pdf")
+
+    print("Bitte editiere den 'if __name__ == \"__main__\":' Block für Tests.")
