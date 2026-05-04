@@ -155,15 +155,13 @@ def master_patch_tool(target_pdf, source_pdf, output_path):
 
 if __name__ == "__main__":
     # --- TEST 1: MERGE ---
-    # merge_pdfs(["seite1.pdf", "seite2.pdf"], "zusammengefügt.pdf")
+    merge_pdfs(["input/scan1.pdf", "input/scan2.pdf"], "output/combined.pdf")
 
     # --- TEST 2: SPLIT ---
-    # split_pdf("gesamt.pdf", 0, "einzelne_seite.pdf")
+    split_pdf("output/combined.pdf", 0, "input/single_page.pdf")
 
     # --- TEST 3: CROP ---
-    # crop_pdf("input.pdf", "cropped.pdf", (50, 50, 400, 600))
+    crop_pdf("input/scan1.pdf", "temps/cropped.pdf", (50, 50, 400, 600))
 
     # --- TEST 4: INTERACTIVE PATCHING ---
-    # master_patch_tool("deine_hausaufgabe.pdf", "dein_leeres_blatt.pdf", "korrigiert.pdf")
-
-    print("Bitte editiere den 'if __name__ == \"__main__\":' Block für Tests.")
+    master_patch_tool("homework.pdf", "temps/patch.pdf", "fixed.pdf")
