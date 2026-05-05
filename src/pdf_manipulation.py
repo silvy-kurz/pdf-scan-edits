@@ -33,14 +33,37 @@ def split_pdf(input_path, page_num, output_path):
     print(f"Erfolg: Seite {page_num} extrahiert -> {output_path}")
 
 
-def crop_pdf(input_path, output_path, coords):
-    """coords: (x0, y0, x1, y1) in PDF-Punkten"""
-    doc = fitz.open(input_path)
-    for page in doc:
-        page.set_cropbox(fitz.Rect(coords))
+def crop_pdf(input_path, output_path, subset_cord):
+    img = pdf_to_cv2_img(input_path)
+
+    h, w, _ = img.shape
+    image_fullsize = (w, h, w, h)
+    clamped_subset = tuple(
+        [
+            min(max(0, cord), fullcord)
+            for cord, fullcord in zip(subset_cord, image_fullsize)
+        ]
+    )
+    min_x, min_y, max_x, max_y = clamped_subset
+    print(h, w)
+    print(clamped_subset)
+    cropped = img[min_y:max_y, min_x:max_x]
+
+    success, img_bytes = cv2.imencode(".png", cropped)
+    if not success:
+        raise RuntimeError("Image encoding failed")
+
+    doc = fitz.open()
+
+    pdf_w = max_x / ZOOM
+    pdf_h = max_y / ZOOM
+
+    page = doc.new_page(width=pdf_w, height=pdf_h)
+
+    page.insert_image(fitz.Rect(0, 0, pdf_w, pdf_h), stream=img_bytes.tobytes())
+
     doc.save(output_path)
     doc.close()
-    print(f"Erfolg: PDF zugeschnitten -> {output_path}")
 
 
 def select_patch_area(image, title, params, overlay_img=None):
