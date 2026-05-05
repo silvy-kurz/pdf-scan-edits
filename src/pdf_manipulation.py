@@ -2,7 +2,7 @@ import fitz  # PyMuPDF
 import cv2
 import numpy as np
 
-ZOOM = 2
+ZOOM = 3
 
 
 def pdf_to_cv2_img(pdf_path, page_num=0):
