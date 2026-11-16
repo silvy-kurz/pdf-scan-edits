@@ -2,3 +2,4 @@ input/*
 output/*
 backup/*
 temps/*
+src/__pycache__/
