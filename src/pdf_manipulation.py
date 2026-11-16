@@ -1,15 +1,18 @@
+# pyright: reportMissingImports=false
 import fitz  # PyMuPDF
 import cv2
 import numpy as np
 
-ZOOM = 3
 
+def pdf_to_cv2_img(
+    pdf_path,
+    detail_level,
+    page_num=0,
+):
 
-def pdf_to_cv2_img(pdf_path, page_num=0):
-    """Konvertiert eine PDF-Seite in ein OpenCV-kompatibles Bild."""
     doc = fitz.open(pdf_path)
     page = doc[page_num]
-    pix = page.get_pixmap(matrix=fitz.Matrix(ZOOM, ZOOM))
+    pix = page.get_pixmap(matrix=fitz.Matrix(detail_level, detail_level))
     img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, 3)
     img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
     doc.close()
@@ -25,45 +28,76 @@ def merge_pdfs(input_paths, output_path):
     print(f"Success: {len(input_paths)} Pages combined into PDF -> {output_path}")
 
 
-def split_pdf(input_path, page_num, output_path):
-    with fitz.open(input_path) as src:
-        new_doc = fitz.open()
-        new_doc.insert_pdf(src, from_page=page_num, to_page=page_num)
-        new_doc.save(output_path)
-    print(f"Success: Page {page_num} extracted -> {output_path}")
+def extract_pdf_slides(input_path, begin_page, end_page, output_path):
+    for page_num in range(begin_page, end_page + 1):
+        with fitz.open(input_path) as src:
+            new_doc = fitz.open()
+            new_doc.insert_pdf(src, from_page=page_num, to_page=page_num)
+            path = f"{output_path}_{page_num}.pdf"
+            new_doc.save(path)
+        print(f"Success: Page {page_num} extracted -> {path}")
 
 
-def crop_pdf(input_path, output_path, subset_cord):
-    img = pdf_to_cv2_img(input_path)
+def crop_pdf(input_path, output_path, detail_level=3, page_num=0):
+    img = pdf_to_cv2_img(input_path, detail_level, page_num)
+    height, width = img.shape[:2]
 
-    h, w, _ = img.shape
-    image_fullsize = (w, h, w, h)
-    clamped_subset = tuple(
-        [
-            min(max(0, cord), fullcord)
-            for cord, fullcord in zip(subset_cord, image_fullsize)
-        ]
-    )
-    min_x, min_y, max_x, max_y = clamped_subset
-    print(h, w)
-    print(clamped_subset)
-    cropped = img[min_y:max_y, min_x:max_x]
+    print("\n--- CROP PDF ---")
+    print("W/A/S/D: Move selection | H/L: Width | K/J: Height")
+    print("+/-: Change step | O: Toggle border")
+    print("ENTER/E: Save crop | Q/ESC: Cancel")
 
-    success, img_bytes = cv2.imencode(".png", cropped)
-    if not success:
-        raise RuntimeError("Image encoding failed")
+    try:
+        cropped, params, _, _ = select_patch_area(
+            img,
+            "CROP_DOC",
+            [width, height, 0, 0, 20],
+        )
 
-    doc = fitz.open()
+        if cropped is None:
+            return
 
-    pdf_w = max_x / ZOOM
-    pdf_h = max_y / ZOOM
+        w, h, x, y, _ = params
 
-    page = doc.new_page(width=pdf_w, height=pdf_h)
+        with fitz.open(input_path) as src, fitz.open() as result:
+            source_page = src[page_num]
 
-    page.insert_image(fitz.Rect(0, 0, pdf_w, pdf_h), stream=img_bytes.tobytes())
+            source_page.remove_rotation()
 
-    doc.save(output_path)
-    doc.close()
+            # Convert preview pixels into PDF coordinates.
+            clip = (
+                fitz.Rect(
+                    x / detail_level,
+                    y / detail_level,
+                    (x + w) / detail_level,
+                    (y + h) / detail_level,
+                )
+                & source_page.rect
+            )
+
+            page = result.new_page(
+                width=clip.width,
+                height=clip.height,
+            )
+
+            page.show_pdf_page(
+                page.rect,
+                src,
+                page_num,
+                clip=clip,
+                keep_proportion=False,
+            )
+
+            pdf_bytes = result.tobytes(garbage=4, deflate=True)
+
+        # Writing after closing the input also permits identical paths.
+        with open(output_path, "wb") as output:
+            output.write(pdf_bytes)
+
+        print(f"Success: Cropped page saved -> {output_path}")
+
+    finally:
+        cv2.destroyAllWindows()
 
 
 def select_patch_area(image, title, params, overlay_img=None, show_border=True):
@@ -126,125 +160,231 @@ def select_patch_area(image, title, params, overlay_img=None, show_border=True):
             return None, [w, h, x, y, step], key, show_border
 
 
-def master_patch_tool(target_pdf, source_pdf, output_path):
-    target_img = pdf_to_cv2_img(target_pdf)
-    source_img = pdf_to_cv2_img(source_pdf)
+def master_patch_tool(target_pdf, source_pdf, output_path, detail_level=3):
+    if detail_level <= 0:
+        raise ValueError("detail_level must be positive")
 
+    target_img = pdf_to_cv2_img(target_pdf, detail_level)
+    source_img = pdf_to_cv2_img(source_pdf, detail_level)
     final_canvas = target_img.copy()
 
-    # PHASE 1
-    print("\n--- PHASE 1: FEHLER IM ZIEL MARKIEREN ---")
-    print(
-        "[ENTER]: Fehler bestätigen | [E]: Fertig (weiter zu Phase 2) | [Q]: Abbrechen"
-    )
-    error_regions = []
-    current_params = [150, 150, 50, 50, 20]
+    target_height, target_width = target_img.shape[:2]
+    source_height, source_width = source_img.shape[:2]
 
-    while True:
-        _, current_params, key, _ = select_patch_area(
-            target_img, "TARGET_DOC", current_params
+    patch_count = 0
+
+    def pdf_rect(x, y, w, h, page):
+        return (
+            fitz.Rect(
+                x / detail_level,
+                y / detail_level,
+                (x + w) / detail_level,
+                (y + h) / detail_level,
+            )
+            & page.rect
         )
-        if key in [ord("q"), 27]:
-            return
-        error_regions.append(list(current_params))
-        if key == ord("e"):
-            break
 
-    # PHASE 2
-    print("\n--- PHASE 2: PATCHES AUSWÄHLEN (VORSCHAU IM TARGET_DOC) ---")
-    print("[ENTER]: Patch einbrennen | [Q]: Abbrechen")
+    print("\n--- PDF PATCH TOOL ---")
+    print("Phase 1: Select target region, then ENTER.")
+    print("Phase 2: Adjust source region, then ENTER to apply.")
+    print("W/A/S/D: Move | H/L: Width | K/J: Height")
+    print("+/-: Change step | O: Toggle border")
+    print("Q/ESC: Finish and save confirmed patches.")
 
-    for i, region in enumerate(error_regions):
-        tw, th, tx, ty, _ = region
+    try:
+        with (
+            fitz.open(target_pdf) as target_doc,
+            fitz.open(source_pdf) as source_doc,
+            fitz.open() as result,
+        ):
+            target_page = target_doc[0]
+            source_page = source_doc[0]
 
-        sw, sh, sx, sy, s_step = tw, th, tx, ty, 5
-        show_border = True
+            target_page.remove_rotation()
+            source_page.remove_rotation()
 
-        while True:
-            sx = max(0, min(sx, source_img.shape[1] - sw))
-            sy = max(0, min(sy, source_img.shape[0] - sh))
-            current_patch = source_img[sy : sy + sh, sx : sx + sw]
+            page = result.new_page(
+                width=target_page.rect.width,
+                height=target_page.rect.height,
+            )
+            page.show_pdf_page(
+                page.rect,
+                target_doc,
+                0,
+                keep_proportion=False,
+            )
 
-            preview_canvas = final_canvas.copy()
-            resized_patch = cv2.resize(current_patch, (tw, th))
-            preview_canvas[ty : ty + th, tx : tx + tw] = resized_patch
+            finished = False
 
-            if show_border:
-                cv2.rectangle(
-                    preview_canvas, (tx, ty), (tx + tw, ty + th), (255, 0, 0), 1
+            while not finished:
+                # PHASE 1: Select the destination on the target PDF.
+                print(f"\nPatch {patch_count + 1}: select target region.")
+
+                target_params = [
+                    min(150, target_width),
+                    min(150, target_height),
+                    0,
+                    0,
+                    5,
+                ]
+
+                selection, target_params, _, _ = select_patch_area(
+                    final_canvas,
+                    "TARGET_DOC",
+                    target_params,
                 )
 
-            cv2.imshow("TARGET_DOC", preview_canvas)
+                if selection is None:
+                    break
 
-            source_display = source_img.copy()
-            cv2.rectangle(source_display, (sx, sy), (sx + sw, sy + sh), (0, 255, 0), 2)
-            cv2.imshow(f"SOURCE_SELECT_{i + 1}", source_display)
+                cv2.destroyWindow("Preview: TARGET_DOC")
 
-            key = cv2.waitKey(0) & 0xFF
-            if key == ord("w"):
-                sy -= s_step
-            elif key == ord("s"):
-                sy += s_step
-            elif key == ord("a"):
-                sx -= s_step
-            elif key == ord("d"):
-                sx += s_step
+                tw, th, tx, ty, step = target_params
 
-            elif key == ord("l"):
-                sw += s_step
-            elif key == ord("h"):
-                sw -= s_step
-            elif key == ord("j"):
-                sh += s_step
-            elif key == ord("k"):
-                sh -= s_step
+                # PHASE 2: Start with the same region in the source PDF.
+                # Clamp only if the source page has different dimensions.
+                sw = min(tw, source_width)
+                sh = min(th, source_height)
+                sx = max(0, min(tx, source_width - sw))
+                sy = max(0, min(ty, source_height - sh))
 
-            elif key == ord("o"):
-                show_border = not show_border
-            elif key in [ord("+"), ord("=")]:
-                s_step = min(s_step + 5, 50)
-            elif key == ord("-"):
-                s_step = max(s_step - 5, 1)
+                min_sw = min(10, source_width)
+                min_sh = min(10, source_height)
+                show_border = True
 
-            elif key in [ord("e"), 13]:
-                final_canvas[ty : ty + th, tx : tx + tw] = resized_patch
-                cv2.destroyWindow(f"SOURCE_SELECT_{i + 1}")
-                break
-            elif key in [ord("q"), 27]:
-                return
+                print("Adjust source region; ENTER applies the patch.")
 
-    # --- PDF EXPORT ---
-    doc_orig = fitz.open(target_pdf)
-    rect_orig = doc_orig[0].rect
-    new_doc = fitz.open()
-    new_page = new_doc.new_page(width=rect_orig.width, height=rect_orig.height)
+                while True:
+                    sw = max(min_sw, min(sw, source_width))
+                    sh = max(min_sh, min(sh, source_height))
+                    sx = max(0, min(sx, source_width - sw))
+                    sy = max(0, min(sy, source_height - sh))
 
-    _, img_enc = cv2.imencode(".png", final_canvas)
-    new_page.insert_image(rect_orig, stream=img_enc.tobytes())
+                    source_patch = source_img[
+                        sy : sy + sh,
+                        sx : sx + sw,
+                    ]
+                    resized_patch = cv2.resize(source_patch, (tw, th))
 
-    new_doc.save(output_path)
-    new_doc.close()
-    doc_orig.close()
-    cv2.destroyAllWindows()
-    print(f"Succesful Patching PDF: {output_path}")
+                    # Show exactly where the patch will appear on the target.
+                    preview = final_canvas.copy()
+                    preview[ty : ty + th, tx : tx + tw] = resized_patch
+
+                    if show_border:
+                        cv2.rectangle(
+                            preview,
+                            (tx, ty),
+                            (tx + tw - 1, ty + th - 1),
+                            (255, 0, 0),
+                            1,
+                        )
+
+                    cv2.imshow("TARGET_DOC", preview)
+
+                    key = cv2.waitKey(0) & 0xFF
+
+                    if key == ord("w"):
+                        sy -= step
+                    elif key == ord("s"):
+                        sy += step
+                    elif key == ord("a"):
+                        sx -= step
+                    elif key == ord("d"):
+                        sx += step
+
+                    elif key == ord("l"):
+                        sw += step
+                    elif key == ord("h"):
+                        sw -= step
+                    elif key == ord("j"):
+                        sh += step
+                    elif key == ord("k"):
+                        sh -= step
+
+                    elif key in [ord("+"), ord("=")]:
+                        step = min(step + 5, 100)
+                        print(f"Step: {step}")
+                    elif key == ord("-"):
+                        step = max(step - 5, 1)
+                        print(f"Step: {step}")
+
+                    elif key == ord("o"):
+                        show_border = not show_border
+
+                    elif key in [13, 10]:
+                        target_rect = pdf_rect(tx, ty, tw, th, page)
+                        source_rect = pdf_rect(sx, sy, sw, sh, source_page)
+
+                        # Cover the destination before placing the source,
+                        # matching the white-backed raster preview.
+                        page.draw_rect(
+                            target_rect,
+                            color=None,
+                            fill=(1, 1, 1),
+                            overlay=True,
+                        )
+
+                        # Export original PDF content, not preview pixels.
+                        page.show_pdf_page(
+                            target_rect,
+                            source_doc,
+                            0,
+                            clip=source_rect,
+                            keep_proportion=False,
+                            overlay=True,
+                        )
+
+                        final_canvas[
+                            ty : ty + th,
+                            tx : tx + tw,
+                        ] = resized_patch
+
+                        patch_count += 1
+                        print(f"Patch {patch_count} applied.")
+                        break
+
+                    elif key in [ord("q"), 27]:
+                        finished = True
+                        break
+
+            pdf_bytes = result.tobytes(garbage=4, deflate=True)
+
+        # Close inputs before writing, permitting identical input/output paths.
+        with open(output_path, "wb") as output:
+            output.write(pdf_bytes)
+
+        print(f"Success: {patch_count} patches saved -> {output_path}")
+
+    finally:
+        cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
-    # split_pdf("output/combined.pdf", 1, "input/single_page.pdf")
-    #
-    # master_patch_tool("input/page_4.pdf", "temps/patch.pdf", "temps/page_4.pdf")
-    # master_patch_tool("input/page_5.pdf", "temps/patch.pdf", "temps/page_5.pdf")
-    master_patch_tool("input/page_5.pdf", "temps/patch.pdf", "temps/test_page_5.pdf")
-    # crop_pdf("temps/page_2.pdf", "temps/crp_page_2.pdf", (0, 0, 2000, 1100))
+    extract_pdf_slides(
+        "input/Skript Mathematik 3 WS 2026-27 Teil1 (Lineare Algebra).pdf",
+        17,
+        18,
+        "dingus.pdf",
+    )
+    merge_pdfs(["dingus.pdf_17.pdf", "dingus.pdf_18.pdf"], "dingus.pdf")
+    # crop_pdf("input/page_2.pdf", "output/page_2.pdf")
     #
     # merge_pdfs(
     #     [
-    #         "input/page_1.pdf",
-    #         "temps/crp_page_2.pdf",
-    #         "input/page_3.pdf",
-    #         "temps/page_4.pdf",
-    #         "temps/page_5.pdf",
-    #         "input/page_6.pdf",
+    #         "output/slide_0.pdf",
+    #         "input/slide_1.pdf",
+    #         "input/slide_2.pdf",
+    #         "input/slide_3.pdf",
+    #         "input/slide_4.pdf",
+    #         "output/slide_5.pdf",
+    #         "output/page_1.pdf",
+    #         "output/page_2.pdf",
+    #         "input/slide_6.pdf",
+    #         "input/slide_7.pdf",
+    #         "input/slide_8.pdf",
+    #         "output/slide_9.pdf",
+    #         "output/page_3.pdf",
+    #         "output/page_4.pdf",
     #     ],
     #     "output/combined.pdf",
     # )
